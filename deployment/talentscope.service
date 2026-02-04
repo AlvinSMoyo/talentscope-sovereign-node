@@ -1,0 +1,15 @@
+[Unit]
+Description=TalentScope (Gunicorn/Flask)
+After=network.target
+
+[Service]
+User=root
+Group=www-data
+WorkingDirectory=/var/www/talentscope
+Environment="PATH=/var/www/talentscope/venv/bin"
+ExecStart=/var/www/talentscope/venv/bin/gunicorn --workers 3 --bind unix:/var/www/talentscope/talentscope.sock app:app
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

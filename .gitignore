@@ -1,0 +1,16 @@
+.env
+*.env
+venv/
+__pycache__/
+*.pyc
+
+data/
+logs/
+sessions/
+state/
+uploads/
+warehouse/
+*.pdf
+
+.DS_Store
+Thumbs.db
