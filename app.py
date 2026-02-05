@@ -1,4 +1,4 @@
-import os, json, io, pypdf, gc, glob, hashlib, imaplib, email
+import os, json, io, pypdf, gc, glob, hashlib, imaplib, email, re
 import sib_api_v3_sdk
 from sib_api_v3_sdk.rest import ApiException
 from datetime import datetime
@@ -21,10 +21,10 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 configuration = sib_api_v3_sdk.Configuration()
 configuration.api_key['api-key'] = os.getenv("BREVO_API_KEY")
 SENDER_EMAIL = os.getenv("SENDER_EMAIL", "recruitment@talentscope-pilot.pro")
-SENDER_NAME = os.getenv("SENDER_NAME", "TalentScope UK")
+SENDER_NAME = os.getenv("SENDER_NAME", "Alvin - TalentScope")
 
-# IMAP CONFIGURATION
-IMAP_SERVER = "mail.smtp2go.com"  # Brevo uses SMTP2GO for IMAP
+# IMAP CONFIGURATION (Updated for PrivateEmail)
+IMAP_SERVER = os.getenv("IMAP_SERVER", "mail.privateemail.com")
 IMAP_USER = os.getenv("IMAP_USER", "recruitment@talentscope-pilot.pro")
 IMAP_PASSWORD = os.getenv("IMAP_PASSWORD", "")
 
@@ -55,7 +55,6 @@ def log_system_event(event_type, message, details=None):
         
         logs.append(log_entry)
         
-        # Keep only last 1000 logs
         if len(logs) > 1000:
             logs = logs[-1000:]
         
@@ -76,7 +75,6 @@ def load_data():
                     data["cv_metadata"] = {}
                 if "ingestion_stats" not in data:
                     data["ingestion_stats"] = {"email": 0, "manual": 0}
-                # Ensure all candidates have status and notes
                 for candidate in data.get("candidates", []):
                     if "status" not in candidate:
                         candidate["status"] = "Applied"
@@ -92,44 +90,39 @@ def save_data(data):
     with open(app.config['SESSION_FILE'], 'w', encoding='utf-8') as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
 
-# ENHANCED SYSTEM PROMPT
+# ENHANCED SYSTEM PROMPT WITH CONSISTENT SCORING
 SYSTEM_PROMPT = """
-You are a Senior UK Recruitment Specialist with deep knowledge of the British job market across all industries.
+You are a Senior UK Recruitment Specialist with deep knowledge of the British job market.
 
-CRITICAL INTELLIGENCE RULES:
+CRITICAL SCORING RULES - ENSURE CONSISTENCY:
 
-1. INDUSTRY RELEVANCE & CAREER ALIGNMENT:
-   - First, identify the industry/sector of BOTH the JD and the CV
-   - If industries are completely unrelated (e.g., Medical CV for IT role, Retail CV for Legal role), set "dismissed": true
-   - EXCEPTION: If the CV shows career transition intent OR transferable skills, evaluate it but note the mismatch
-   - Example: Junior nurse applying for Senior Consultant role = SAME INDUSTRY, evaluate but note experience gap
+1. OVERALL SCORE MUST ALIGN WITH SUB-SCORES:
+   - Overall score should be CLOSE TO the average of (stat_score + tech_score + team_score) / 3
+   - Do NOT give high overall score (82%) with low sub-scores (Stat: 25%, Tech: 35%, Team: 25%)
+   - Example GOOD: Overall 82% → Stat: 80%, Tech: 85%, Team: 80%
+   - Example BAD: Overall 82% → Stat: 25%, Tech: 35%, Team: 25% ❌
+   
+2. SCORING BREAKDOWN:
+   - stat_score: RTW status, professional registrations (GMC, NMC), DBS, legal compliance
+   - tech_score: Technical skills, experience level, domain expertise
+   - team_score: Cultural fit, collaboration skills, communication
+   
+3. IF A CANDIDATE SCORES LOW ON STATUTORY (e.g., no UK RTW), OVERALL SCORE MUST BE LOW TOO
+   - No RTW = Maximum overall score 40%
+   - Missing critical registrations = Maximum 50%
 
-2. EXPERIENCE LEVEL MATCHING:
-   - Junior applicants for Senior roles: DO NOT dismiss if same industry. Score lower on experience but acknowledge potential
-   - Career changers within healthcare/tech: Evaluate transition readiness
+4. INDUSTRY RELEVANCE:
+   - Completely different industry = "dismissed": true
+   - Same industry but junior = Low scores but not dismissed
 
-3. UK-SPECIFIC REQUIREMENTS:
-   - Right to Work (RTW) status is CRITICAL for stat_score
-   - Professional registrations (GMC, NMC, SRA, etc.) mandatory for regulated professions
-   - DBS checks for healthcare, education, social care roles
-
-4. TWO-SENTENCE SUMMARY RULE:
-   - First sentence: Overall fit and key strengths
-   - Second sentence: Notable gap, concern, or exceptional quality
-
-5. WARM, PERSONALISED EMAIL (email_body):
-   - Reference SPECIFIC experience that matches the role
-   - Example: "Your 8 years managing ICU at Royal London Hospital makes you an excellent match for our Clinical Lead position."
-
-6. SCORING REALISM:
-   - Most candidates: 50-75%
-   - Good matches: 70-85%
-   - Exceptional: 85-95%
+5. TWO-SENTENCE SUMMARY:
+   - First: Overall fit and strengths
+   - Second: Gap or concern
 
 OUTPUT VALID JSON ONLY:
 {
   "candidate_name": "string",
-  "score": integer (0-100),
+  "score": integer (must align with sub-scores average),
   "stat_score": integer,
   "tech_score": integer,
   "team_score": integer,
@@ -138,20 +131,42 @@ OUTPUT VALID JSON ONLY:
   "email": "email@domain.com",
   "email_body": "Warm personalised message",
   "dismissed": boolean,
-  "industry": "primary industry/sector"
+  "industry": "primary industry"
 }
 """
 
+# IMPROVED CAMPAIGN PROMPTS
 CAMPAIGN_PROMPT_TEMPLATE = """
-Generate UK recruitment marketing content.
+Generate UK recruitment marketing content for this role.
 
-JD: {jd}
+JD:
+{jd}
 
-1. LINKEDIN POST (150-200 words, 3-5 emojis, hashtags, call to action)
-2. JOB BOARD AD (bold headers, bullets, structured like JD, 250-350 words)
-3. EQUALITY ACT 2010 AUDIT (50-75 words compliance statement)
+Generate THREE pieces:
 
-Return JSON: {{"linkedin": "...", "job_boards": "...", "compliance_report": "..."}}
+1. LINKEDIN POST (Professional social media format):
+   - Start with an attention-grabbing opening (e.g., "🚀 Exciting opportunity!")
+   - 3-4 short paragraphs (not bullet points)
+   - Use 4-6 relevant emojis throughout (not excessive)
+   - Include hashtags at the END: #UKJobs #Hiring #[Industry] #[Role]
+   - Call to action: "Apply now!" or "DM for details"
+   - 150-200 words
+   - Format like a REAL LinkedIn post (conversational, engaging, professional)
+
+2. JOB BOARD ADVERTISEMENT (Formal structured format):
+   - Use **bold headers** (format: **Header Name**)
+   - Sections: **Role Summary**, **Key Responsibilities**, **Essential Requirements**, **What We Offer**
+   - Bullet points under each section (use - not *)
+   - British English
+   - 250-350 words
+   - Include "Competitive salary" if not specified
+
+3. EQUALITY ACT 2010 COMPLIANCE AUDIT:
+   - Brief professional statement (50-75 words)
+   - Confirm JD avoids discriminatory language
+   - Reference UK Equality Act 2010
+
+Return as JSON: {{"linkedin": "...", "job_boards": "...", "compliance_report": "..."}}
 """
 
 SHORTLIST_EMAIL_TEMPLATE = """
@@ -166,6 +181,14 @@ Requirements:
 - Invite to interview
 - Mention next steps (contact within 5 working days)
 - British English, 100-150 words
+- END WITH SIGNATURE BLOCK:
+
+Best regards,
+
+{sender_name}
+Recruitment Team
+TalentScope UK
+{sender_email}
 """
 
 @app.route('/')
@@ -186,7 +209,7 @@ def tabs():
 
 @app.route('/generate_jd', methods=['POST'])
 def generate_jd():
-    """Generate job description using OpenAI"""
+    """Generate job description"""
     try:
         data = request.get_json()
         role = data.get('role_title', 'Role')
@@ -196,7 +219,7 @@ def generate_jd():
 Requirements:
 - British English
 - **Bold markdown headers**: **Role Summary**, **Key Responsibilities**, **Essential Requirements**, **Desirable Skills**, **What We Offer**
-- Bullet points under each section
+- Bullet points under each section (use - not *)
 - UK-specific requirements (RTW, DBS, professional registration if applicable)
 - UK Equality Act 2010 compliant
 - 300-400 words
@@ -217,7 +240,7 @@ Requirements:
 
 @app.route('/analyze_tribunal', methods=['POST'])
 def analyze_tribunal():
-    """Analyze CVs with intelligent industry matching"""
+    """Analyze CVs with intelligent matching"""
     try:
         jd = request.form.get('full_jd', '').strip()
         mode = request.form.get('mode', 'new')
@@ -245,7 +268,6 @@ def analyze_tribunal():
                 
                 if f_hash in data.get("hashes", {}):
                     fpath = data["hashes"][f_hash]
-                    print(f"DUPLICATE: {f.filename}")
                 else:
                     fname = secure_filename(f.filename)
                     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -268,16 +290,12 @@ def analyze_tribunal():
                         "source": "manual"
                     }
                     
-                    # Update ingestion stats
                     data["ingestion_stats"]["manual"] = data.get("ingestion_stats", {}).get("manual", 0) + 1
-                    
-                    print(f"NEW CV: {unique_fname}")
                 
                 files_to_process.append(fpath)
                 
         elif mode == 'warehouse':
             files_to_process = glob.glob(os.path.join(app.config['UPLOAD_FOLDER'], '*.pdf'))
-            print(f"WAREHOUSE SCAN: {len(files_to_process)} CVs")
             
             if len(files_to_process) == 0:
                 return jsonify({"error": "No CVs in warehouse"}), 400
@@ -313,10 +331,9 @@ def analyze_tribunal():
                     analysis['status'] = 'Applied'
                     analysis['notes'] = ''
                     data["candidates"].append(analysis)
-                    print(f"EVALUATED: {analysis['candidate_name']} - {analysis['score']}%")
                     
             except Exception as e:
-                print(f"ERROR: {os.path.basename(fpath)}: {e}")
+                print(f"ERROR: {e}")
                 continue
         
         save_data(data)
@@ -336,20 +353,24 @@ def analyze_tribunal():
 
 @app.route('/sync_email', methods=['POST'])
 def sync_email():
-    """Sync CVs from IMAP inbox"""
+    """Sync CVs from IMAP inbox with auto-acknowledgment"""
     try:
         if not IMAP_PASSWORD:
             return jsonify({"error": "IMAP not configured"}), 400
         
         data = load_data()
         new_cvs = 0
+        acknowledgments_sent = 0
         
-        # Connect to IMAP
+        # Brevo API instance for sending acknowledgments
+        api_instance = sib_api_v3_sdk.TransactionalEmailsApi(
+            sib_api_v3_sdk.ApiClient(configuration)
+        )
+        
         mail = imaplib.IMAP4_SSL(IMAP_SERVER)
         mail.login(IMAP_USER, IMAP_PASSWORD)
         mail.select("inbox")
         
-        # Search for unread emails
         status, messages = mail.search(None, 'UNSEEN')
         
         if status != "OK":
@@ -359,20 +380,28 @@ def sync_email():
         
         for email_id in email_ids:
             try:
-                # Fetch email
                 status, msg_data = mail.fetch(email_id, '(RFC822)')
                 
                 if status != "OK":
                     continue
                 
-                # Parse email
                 raw_email = msg_data[0][1]
                 email_message = email.message_from_bytes(raw_email)
                 
-                # Extract sender
                 sender = email_message.get("From", "unknown@unknown.com")
                 
-                # Look for PDF attachments
+                # Extract clean email address
+                sender_email = sender
+                if '<' in sender and '>' in sender:
+                    sender_email = sender.split('<')[1].split('>')[0].strip()
+                
+                # Extract sender name
+                sender_name = "Applicant"
+                if '<' in sender:
+                    sender_name = sender.split('<')[0].strip().strip('"')
+                
+                cv_found = False
+                
                 for part in email_message.walk():
                     if part.get_content_maintype() == 'multipart':
                         continue
@@ -381,13 +410,10 @@ def sync_email():
                     
                     filename = part.get_filename()
                     if filename and filename.lower().endswith('.pdf'):
-                        # Download PDF
                         file_bytes = part.get_payload(decode=True)
                         f_hash = get_file_hash(file_bytes)
                         
-                        # Check for duplicate
                         if f_hash not in data.get("hashes", {}):
-                            # Save CV
                             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
                             safe_filename = secure_filename(filename)
                             unique_fname = f"{timestamp}_email_{safe_filename}"
@@ -410,13 +436,48 @@ def sync_email():
                                 "sender": sender
                             }
                             
-                            # Update ingestion stats
                             data["ingestion_stats"]["email"] = data.get("ingestion_stats", {}).get("email", 0) + 1
                             
                             new_cvs += 1
-                            print(f"EMAIL CV: {unique_fname} from {sender}")
+                            cv_found = True
+                            
+                            print(f"NEW EMAIL CV: {unique_fname} from {sender_email}")
                 
-                # Mark as read
+                # SEND AUTO-ACKNOWLEDGMENT if CV was found
+                if cv_found:
+                    try:
+                        acknowledgment_message = f"""Dear {sender_name},
+
+Thank you for submitting your application to TalentScope UK. We have successfully received your CV and it will be reviewed by our recruitment team.
+
+Our AI-powered screening system will evaluate your application against our current vacancies, and we will contact you within 5 working days if your profile matches our requirements.
+
+We appreciate your interest in joining our organisation and wish you the best in your career journey.
+
+Best regards,
+
+{SENDER_NAME}
+Recruitment Team
+TalentScope UK
+{SENDER_EMAIL}"""
+
+                        send_smtp_email = sib_api_v3_sdk.SendSmtpEmail(
+                            to=[{"email": sender_email, "name": sender_name}],
+                            sender={"name": SENDER_NAME, "email": SENDER_EMAIL},
+                            subject="Application Received - TalentScope UK",
+                            html_content=f"<html><body><p style='white-space: pre-line;'>{acknowledgment_message}</p></body></html>"
+                        )
+                        
+                        api_instance.send_transac_email(send_smtp_email)
+                        acknowledgments_sent += 1
+                        
+                        print(f"AUTO-ACKNOWLEDGMENT SENT to {sender_email}")
+                        
+                    except Exception as ack_error:
+                        print(f"Failed to send acknowledgment to {sender_email}: {ack_error}")
+                        # Don't fail the entire sync if acknowledgment fails
+                
+                # Mark email as read
                 mail.store(email_id, '+FLAGS', '\\Seen')
                 
             except Exception as e:
@@ -428,11 +489,12 @@ def sync_email():
         
         save_data(data)
         
-        log_system_event("EMAIL_SYNC", f"Synced {new_cvs} new CVs from email")
+        log_system_event("EMAIL_SYNC", f"Synced {new_cvs} CVs, sent {acknowledgments_sent} acknowledgments")
         
         return jsonify({
             "status": "success",
             "new_cvs": new_cvs,
+            "acknowledgments_sent": acknowledgments_sent,
             "total_emails_processed": len(email_ids)
         })
         
@@ -470,18 +532,16 @@ def update_candidate():
 
 @app.route('/get_analytics', methods=['GET'])
 def get_analytics():
-    """Get analytics data for dashboard"""
+    """Get analytics data"""
     try:
         data = load_data()
         candidates = data.get("candidates", [])
         
-        # Industry distribution
         industry_dist = {}
         for c in candidates:
             industry = c.get('industry', 'Unknown')
             industry_dist[industry] = industry_dist.get(industry, 0) + 1
         
-        # Score distribution
         score_ranges = {
             "0-40": 0,
             "41-60": 0,
@@ -519,7 +579,6 @@ def get_logs():
         with open(app.config['LOGS_FILE'], 'r', encoding='utf-8') as f:
             logs = json.load(f)
         
-        # Return last 50 logs
         return jsonify(logs[-50:])
         
     except Exception as e:
@@ -527,7 +586,7 @@ def get_logs():
 
 @app.route('/send_outreach', methods=['POST'])
 def send_outreach():
-    """Send single email via Brevo"""
+    """Send single email"""
     try:
         payload = request.json
         
@@ -554,7 +613,7 @@ def send_outreach():
 
 @app.route('/bulk_decision', methods=['POST'])
 def bulk_decision():
-    """Bulk decisioning with message preview"""
+    """Bulk decisioning with consistent signatures"""
     try:
         payload = request.json
         threshold = int(payload.get('threshold', 65))
@@ -584,13 +643,24 @@ def bulk_decision():
                             model="gpt-4o",
                             messages=[{"role": "user", "content": SHORTLIST_EMAIL_TEMPLATE.format(
                                 candidate_name=name,
-                                rationale="\n".join(candidate.get('rationale', []))
+                                rationale="\n".join(candidate.get('rationale', [])),
+                                sender_name=SENDER_NAME,
+                                sender_email=SENDER_EMAIL
                             )}],
                             timeout=30
                         )
                         message = response.choices[0].message.content.strip()
                     except:
-                        message = candidate.get('email_body', 'Default shortlist')
+                        message = f"""Dear {name},
+
+Congratulations on being shortlisted!
+
+Best regards,
+
+{SENDER_NAME}
+Recruitment Team
+TalentScope UK
+{SENDER_EMAIL}"""
                     
                     results["preview_messages"][name] = {"type": "shortlist", "message": message}
                 else:
@@ -601,7 +671,10 @@ Thank you for your application. After careful consideration, we have decided to 
 We wish you success in your career search.
 
 Best regards,
-{SENDER_NAME}"""
+
+{SENDER_NAME}
+Recruitment Team
+TalentScope UK"""
                     results["preview_messages"][name] = {"type": "regret", "message": regret}
             
             return jsonify(results)
@@ -627,29 +700,36 @@ Best regards,
                             model="gpt-4o",
                             messages=[{"role": "user", "content": SHORTLIST_EMAIL_TEMPLATE.format(
                                 candidate_name=name,
-                                rationale="\n".join(candidate.get('rationale', []))
+                                rationale="\n".join(candidate.get('rationale', [])),
+                                sender_name=SENDER_NAME,
+                                sender_email=SENDER_EMAIL
                             )}],
                             timeout=30
                         )
                         message = response.choices[0].message.content.strip()
                     except:
-                        message = candidate.get('email_body', f"Congratulations {name}!")
+                        message = f"Dear {name},\n\nCongratulations!\n\nBest regards,\n\n{SENDER_NAME}\nRecruitment Team\nTalentScope UK\n{SENDER_EMAIL}"
                     
                     subject = "Interview Invitation - TalentScope UK"
                 else:
                     subject = "Application Update - TalentScope UK"
                     message = f"""Dear {name},
 
-Thank you for your application. After careful consideration, we have decided to progress with other candidates.
+Thank you for your application. After careful consideration, we have decided to progress with other candidates whose experience more closely aligns with our requirements.
+
+We wish you success in your career search.
 
 Best regards,
-{SENDER_NAME}"""
+
+{SENDER_NAME}
+Recruitment Team
+TalentScope UK"""
                 
                 send_smtp_email = sib_api_v3_sdk.SendSmtpEmail(
                     to=[{"email": email_addr, "name": name}],
                     sender={"name": SENDER_NAME, "email": SENDER_EMAIL},
                     subject=subject,
-                    html_content=f"<html><body><p>{message.replace(chr(10), '<br>')}</p></body></html>"
+                    html_content=f"<html><body><p style='white-space: pre-line;'>{message}</p></body></html>"
                 )
                 
                 api_instance.send_transac_email(send_smtp_email)
@@ -672,7 +752,7 @@ Best regards,
 
 @app.route('/clear_memory', methods=['POST'])
 def clear_memory():
-    """Clear all stored CVs"""
+    """Clear all CVs"""
     try:
         cv_files = glob.glob(os.path.join(app.config['UPLOAD_FOLDER'], '*.pdf'))
         for f in cv_files:
@@ -690,18 +770,17 @@ def clear_memory():
 
 @app.route('/get_candidate_data')
 def get_candidate():
-    """Retrieve candidate data by name - FIXED VERSION"""
+    """Retrieve candidate data"""
     try:
         name = request.args.get('name', '').strip()
         
         if not name:
-            return jsonify({"error": "No candidate name provided"}), 400
+            return jsonify({"error": "No name provided"}), 400
         
         data = load_data()
         
         for candidate in data["candidates"]:
             if candidate.get('candidate_name') == name:
-                # Ensure status and notes exist
                 if 'status' not in candidate:
                     candidate['status'] = 'Applied'
                 if 'notes' not in candidate:
@@ -711,12 +790,11 @@ def get_candidate():
         return jsonify({"error": "Candidate not found"}), 404
         
     except Exception as e:
-        print(f"Error in get_candidate_data: {e}")
         return jsonify({"error": str(e)}), 500
 
 @app.route('/download_cv/<filename>')
 def download_cv(filename):
-    """Download CV file"""
+    """Download CV"""
     try:
         return send_from_directory(app.config['UPLOAD_FOLDER'], filename, as_attachment=True)
     except:
@@ -724,7 +802,7 @@ def download_cv(filename):
 
 @app.route('/generate_campaign', methods=['POST'])
 def generate_campaign():
-    """Generate marketing content"""
+    """Generate marketing content with improved formatting"""
     try:
         jd = request.json.get('full_jd', '').strip()
         
@@ -734,7 +812,7 @@ def generate_campaign():
         response = client.chat.completions.create(
             model="gpt-4o",
             messages=[
-                {"role": "system", "content": "UK recruitment marketing expert. Output valid JSON."},
+                {"role": "system", "content": "UK recruitment marketing expert. Output valid JSON with properly formatted content."},
                 {"role": "user", "content": CAMPAIGN_PROMPT_TEMPLATE.format(jd=jd)}
             ],
             response_format={"type": "json_object"},
@@ -742,6 +820,11 @@ def generate_campaign():
         )
         
         campaign_data = json.loads(response.choices[0].message.content)
+        
+        # Convert **text** to <strong>text</strong> for job boards
+        if 'job_boards' in campaign_data:
+            job_boards_html = re.sub(r'\*\*(.*?)\*\*', r'<strong>\1</strong>', campaign_data['job_boards'])
+            campaign_data['job_boards_html'] = job_boards_html
         
         log_system_event("CAMPAIGN_GENERATED", "Generated marketing content")
         
@@ -752,7 +835,7 @@ def generate_campaign():
 
 @app.route('/api/stats')
 def get_stats():
-    """Get system statistics"""
+    """Get stats"""
     try:
         data = load_data()
         cv_count = len(glob.glob(os.path.join(app.config['UPLOAD_FOLDER'], '*.pdf')))
