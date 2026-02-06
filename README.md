@@ -21,13 +21,14 @@ Instead, it operates on real-world recruitment inputs:
 Key capabilities include:
 
 * **Zero-Touch Ingestion:**
-  An agentic **IMAP listener** monitors a dedicated recruitment inbox and automatically harvests CVs without manual intervention.
+  An agentic **IMAP listener** monitors a dedicated recruitment inbox and automatically harvests CVs without manual intervention, optionally issuing immediate acknowledgement responses to candidates.
 
 * **Document Intelligence:**
   Raw PDF documents are parsed, normalized, and deduplicated using **SHA-256 hashing**, ensuring integrity, provenance, and repeatability.
 
-* **Closed-Loop Workflows:**
-  Candidate ingestion, evaluation, outreach, and review are handled as a single operational pipeline rather than disconnected scripts.
+* **State-Managed Workflows:**
+  Ingestion, evaluation, and outreach operate within a single pipeline. Workspace state is explicitly reset between recruitment campaigns to prevent residual data, context bleed, or cross-session contamination.
+
 
 This transition—from spreadsheet rows to live documents—marks the shift from experimental data science to systems engineering.
 

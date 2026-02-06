@@ -497,13 +497,33 @@
         }
         
         function refreshResults() {
-            if (confirm('Clear results?')) {
-                allCandidates = [];
-                localStorage.removeItem('candidates');
-                document.getElementById('res-area').innerHTML = `<h4><i class="fas fa-chart-line"></i> Results</h4><p style="opacity: 0.6; text-align: center; padding: 40px;">Cleared</p>`;
-                showAlert('Cleared', 'success');
-            }
-        }
+    	    // Mode-aware confirmation
+    	    const context = (mode === 'marketing') ? 'JD and campaign content' : 'JD and analysis results';
+    
+    	    if (confirm(`Clear ${context}?`)) {  // ← Fix: Use backticks ` not regular quotes
+        	// 1. Clear the Candidate Data
+        	allCandidates = [];
+        	localStorage.removeItem('candidates');
+        
+        	// 2. Clear the JD Storage (The fix you wanted)
+        	document.getElementById('role-input').value = '';
+        	document.getElementById('jd-output').value = '';
+        	localStorage.removeItem('lastRole');
+        	localStorage.removeItem('lastJD');
+        
+        	// 3. Reset the UI Area
+        	const area = document.getElementById('res-area');
+        	area.innerHTML = `
+            	    <h4><i class="fas fa-chart-line"></i> Results</h4>
+            	    <p style="opacity: 0.6; text-align: center; padding: 40px 20px;">
+                	<i class="fas fa-inbox" style="font-size: 3rem; display: block; margin-bottom: 15px; opacity: 0.3;"></i>
+                	Workspace cleared. Ready for a new Sovereign Harvest.
+            	    </p>
+        	`;
+        
+        	showAlert('Workspace cleared successfully', 'success');
+    	    }
+	}
         
         async function generateJD() {
             const roleInput = document.getElementById('role-input');
